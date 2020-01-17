@@ -38,52 +38,98 @@
 #include <avr/interrupt.h>
 #include "digitalWriteFast.h"
 
-uint8_t LED_STRIP = 9;
-uint8_t led_on=false;
+// 7 Segment LED Display - Model 5611H
+// http://www.xlitx.com/datasheet/5611BH.pdf
+// 3, 8: VCC
+// a-7, b-6, c-4, d-2, e-1, f-9, g-10, dp-5, pin 1 is to the left of d
+//          / a \
+//          f   b
+//          | g |
+//          e   c
+//          \ d / dp
+
+const uint8_t segment_pins[]={0, 13, 12, 11, 1, 4, 20, 10};
+const uint8_t D_a  0
+const uint8_t D_b 13
+const uint8_t D_c 12
+const uint8_t D_d 11
+const uint8_t D_e  1
+const uint8_t D_f  4
+const uint8_t D_g 20
+const uint8_t D_dp 10
+const uint8_t LED_STRIP = 7;
 const uint8_t DOWN_BUTTON=2; // INT0
-const uint8_t UP_BUTTON=3; // INT1
+const uint8_t UP_BUTTON=3;   // INT1
+
+uint8_t led_on=false;
+volatile uint8_t segments=0; // Segments are stored in a byte like: abcdefg.  (that last dot is the dp)
+
 uint8_t l1 = 10;
 uint8_t l2 = 20;
 uint8_t l3 = 40;
 uint8_t l4 = 200;
 uint8_t l5 = 255;
 
+#define writeSeg_a(V) bitWrite(PORTx, , V)
+
+volatile uint8_t light_level=0;
+volatile uint8_t led_sequence=7;
+volatile uint8_t multiplex_sequence=0;
+volatile uint8_t seven_segment_value=0;
+volatile uint8_t segments[]={
+   // abcdefg.
+    0b11111100, // 0
+    0b01100000, // 1
+    0b11011010, // 2
+    0b11110010, // 3
+    0b01100110, // 4
+    0b10110110, // 5
+    0b10111110, // 6
+    0b11100000, // 7
+    0b11111110, // 8
+    0b11110110, // 9
+    0b00000001  // decimal point
+};
+
 //lISR(TIMER2_OVF_vect) {
 ISR(TIMER2_COMP_vect) {
   bitWrite(PORTB, 1, 1);
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
-  __asm__ __volatile__ ("nop");
+  if (light_level < 50) {
+    digitalWriteFast(segment_pins[seven_segment_value], 0);
+  }
+  else if (light_level < 100) {
+    if (multiplex_sequence < 60) {
+      digitalWriteFast(segment_pins[seven_segment_value],
+                       bitRead(segments[seven_segment_value], led_sequence));
+    } else digitalWriteFast(segment_pins[seven_segment_value], 0);
+  }
+  else {
+      digitalWriteFast(segment_pins[seven_segment_value],
+                       bitRead(segments[seven_segment_value], led_sequence));
+  }
+  if (led_sequence == 0) led_sequence=7;
+  else led_sequence --;
+  if (multiplex_sequence == 99) multiplex_sequence == 0;
+  else multiplex_sequence++;
   bitWrite(PORTB, 1, 0);
+}
+
+// Display a number on seven segment LED
+void show_number(uint8_t number) {
+  switch (number) {
+                    // abcdefg.
+    case 0: segments=0b11111100; break;
+    case 1: segments=0b01100000; break;
+    case 2: segments=0b11011010; break;
+    case 3: segments=0b11110010; break;
+    case 4: segments=0b01100110; break;
+    case 5: segments=0b10110110; break;
+    case 6: segments=0b10111110; break;
+    case 7: segments=0b11100000; break;
+    case 8: segments=0b11111110; break;
+    case 9: segments=0b11110110; break;
+    case 10: segments=0b00000001; break;// decimal point
+  }
 }
 
 void set_all_pins_input() {
@@ -106,7 +152,6 @@ void set_light_level(uint8_t pin, uint8_t level) {
 
 }
 
-uint8_t light_level=0;
 void turn_led_on(void) {
   pinMode(LED_STRIP, OUTPUT);
   led_on = true;
@@ -119,7 +164,7 @@ void setup() {
   // Set up timer 2
   SFIOR |= (1 << PSR2);  // reset prescaler. Not sure I need to do this.
   TCCR2 = 0;
-  OCR2 = 0x7B;  // *approximately* 1024 times per second.
+  OCR2 = 0x7B;  // *approximately* 1024 times per second at 8MHz clock
   TCCR2 &= ~(1 << COM20); // SHUT OFF OUTPUT PIN
   TCCR2 &= ~(1 << COM21); // SHUT OFF OUTPUT PIN
   //TCCR2 |= (1 << WGM21 | 1 << WGM20);  /* Fast PWM mode */
