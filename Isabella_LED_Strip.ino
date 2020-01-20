@@ -18,67 +18,172 @@
  */
 // === DESCRIPTION =====================================================================
 // ATMEL ATMEGA8A / ARDUINO
+// s == seven segment display pin, l == led strip pin, u == up button, d == down button,
+// h == hours button, x=debug signal, y=debug clock.
 //
 //                           +-\/-+
 //     RESET   (D 22)  PC6  1|    |28  PC5  (D 19  A5  SCL ADC5)
-//             (D  0)  PD0  2|    |27  PC4  (D 18  A4  SDA ADC4)
-//             (D  1)  PD1  3|    |26  PC3  (D 17  A3  ADC3)
-//       INT0  (D  2)  PD2  4|    |25  PC2  (D 16  A2  ADC2)
-//       INT1  (D  3)  PD3  5|    |24  PC1  (D 15  A1  ADC1)
-//             (D  4)  PD4  6|    |23  PC0  (D 14  A0  ADC0)
+//             (D  0)  PD0  2|s   |27  PC4  (D 18  A4  SDA ADC4)
+//             (D  1)  PD1  3|s   |26  PC3  (D 17  A3  ADC3)
+//       INT0  (D  2)  PD2  4|u  s|25  PC2  (D 16  A2  ADC2)
+//       INT1  (D  3)  PD3  5|d  l|24  PC1  (D 15  A1  ADC1)
+//             (D  4)  PD4  6|s  h|23  PC0  (D 14  A0  ADC0)
 //                     VCC  7|    |22  GND
 //                     GND  8|    |21  AREF
-//             (D 20)  PB6  9|    |20  AVCC
-//             (D 21)  PB7 10|    |19  PB5  (D 13  SCK) 
-//             (D  5)  PD5 11|    |18  PB4  (D 12  MISO) 
-//  AIN0       (D  6)  PD6 12|    |17  PB3  (D 11  MOSI OC2)
-//  AIN1       (D  7)  PD7 13|    |16  PB2  (D 10  SS OC1A)
-//             (D  8)  PB0 14|    |15  PB1  (D  9     OC1B)
+//             (D 20)  PB6  9|s   |20  AVCC
+//             (D 21)  PB7 10|   s|19  PB5  (D 13  SCK) 
+//             (D  5)  PD5 11|   s|18  PB4  (D 12  MISO) 
+//  AIN0       (D  6)  PD6 12|   s|17  PB3  (D 11  MOSI OC2)
+//  AIN1       (D  7)  PD7 13|   y|16  PB2  (D 10  SS OC1A)
+//             (D  8)  PB0 14|   x|15  PB1  (D  9     OC1B)
 //                           +----+
 #include <avr/interrupt.h>
 #include "digitalWriteFast.h"
 
-// 7 Segment LED Display - Model 5611H
-// http://www.xlitx.com/datasheet/5611BH.pdf
-// 3, 8: VCC
-// a-7, b-6, c-4, d-2, e-1, f-9, g-10, dp-5, pin 1 is to the left of d
-//          / a \
-//          f   b
-//          | g |
-//          e   c
-//          \ d / dp
+/* 7 Segment LED Display - Model 5611H
+   http://www.xlitx.com/datasheet/5611BH.pdf
+   3, 8: VCC
+   a-7, b-6, c-4, d-2, e-1, f-9, g-10, dp-5, pin 1 is to the left of d
+        / a \
+        f   b
+        | g |
+        e   c
+        \ d / dp
+*/
+/* 2N7000 transistor
+ *  ___
+ * /___\
+ * S G D
+ *
+ */
 
-const uint8_t segment_pins[]={0, 13, 12, 11, 1, 4, 20, 10};
-const uint8_t D_a  0
-const uint8_t D_b 13
-const uint8_t D_c 12
-const uint8_t D_d 11
-const uint8_t D_e  1
-const uint8_t D_f  4
-const uint8_t D_g 20
-const uint8_t D_dp 10
-const uint8_t LED_STRIP = 7;
-const uint8_t DOWN_BUTTON=2; // INT0
-const uint8_t UP_BUTTON=3;   // INT1
+// Requires pgm_read_byte() to get it out. Costs 1 extra cycle. Not worth it on slower CPUs.
+// const uint8_t PROGMEM segment_pins[] = {0, 13, 12, 11, 1, 4, 20, 10};
+const uint8_t segment_pins[] = {4, 20, 17, 18, 19, 1, 0, 16};
+const uint8_t LED_STRIP = 15;
+const uint8_t DOWN_BUTTON = 2; // INT0
+const uint8_t UP_BUTTON = 3;   // INT1
+const uint8_t HOURS_BUTTON = 14;
 
 uint8_t led_on=false;
-volatile uint8_t segments=0; // Segments are stored in a byte like: abcdefg.  (that last dot is the dp)
 
-uint8_t l1 = 10;
-uint8_t l2 = 20;
-uint8_t l3 = 40;
-uint8_t l4 = 200;
-uint8_t l5 = 255;
-
-#define writeSeg_a(V) bitWrite(PORTx, , V)
-
+volatile uint8_t indicator_value=0;
 volatile uint8_t light_level=0;
-volatile uint8_t led_sequence=7;
 volatile uint8_t multiplex_sequence=0;
-volatile uint8_t seven_segment_value=0;
-volatile uint8_t segments[]={
+volatile uint8_t segment_bitmap;
+uint8_t seven_segment_value=0;
+
+volatile uint8_t segment_state, segment_pin, current_segment = 0;
+volatile uint8_t seven_segment_display_update=0;
+volatile uint8_t display_bit=0b10000000;
+
+#define TOGGLE_DEBUG_PIN bitWrite(PORTB, 1, 1); bitWrite(PORTB, 1, 0)
+#define DEBUG_BIT(V) (DDRB |= ((1 << DDB1) & (V)) | (1 << DDB2)); DDRB &= 0b11111001
+static inline void isr_display_value(uint8_t value) {
+  uint8_t i;
+  for (i=0b10000000; i >> 0; i++) {
+    TOGGLE_DEBUG_PIN;
+    if (i & value) {
+      TOGGLE_DEBUG_PIN;
+    } else {
+      __asm__ __volatile__ ("nop");
+      __asm__ __volatile__ ("nop");
+    }
+    TOGGLE_DEBUG_PIN;
+  }
+  //__asm__ __volatile__ ("nop");
+}
+
+// On is LOW...
+#define SEGMENT_OFF 1
+#define SEGMENT_ON 0
+//ISR(timer2_ovf_vect) {
+ISR(TIMER2_COMP_vect) {
+  DEBUG_BIT(1);
+  // do seven segment display
+
+  // NOOP ************************
+  // __asm__ __volatile__ ("nop");
+
+  // segment_state = ( (segments[seven_segment_value] & display_bit) > 1 ) ? SEGMENT_ON : SEGMENT_OFF;
+  segment_pin = segment_pins[current_segment];
+  //isr_display_value(current_segment);
+  __asm__ __volatile__ ("nop");
+  //isr_display_value(segment_pin);
+  __asm__ __volatile__ ("nop");
+  //isr_display_value(display_bit);
+  __asm__ __volatile__ ("nop");
+  //isr_display_value(segment_bitmap);
+  if ((segment_bitmap & display_bit) != 0) {
+    digitalWriteFast(segment_pin, SEGMENT_ON);
+  }
+  else {
+    digitalWriteFast(segment_pin, SEGMENT_OFF);
+  }
+  display_bit >>= 1; current_segment--;
+  if (display_bit == 0) {
+    display_bit = 0b10000000; current_segment=7;
+  }
+  // Multiplexing means the seven segment display will never be as bright as the string.
+  // As a matter of fact, it should be 1/10th as bright. Maybe not even worry about this?
+  /*if ((multiplex_sequence <= 80 && light_level < 50) ||
+      (multiplex_sequence <= 150 && light_level < 150) ||
+      (multiplex_sequence > 150)) { digitalWriteFast(segment_pin, segment_state); }
+  else digitalWriteFast(segment_pins[seven_segment_value], 1);*/
+
+
+  // do led string
+  // light_level=250;
+  if (multiplex_sequence <= light_level) { digitalWriteFast(LED_STRIP, 1); }
+  else { digitalWriteFast(LED_STRIP, 0); }
+  multiplex_sequence++;
+  //bitWrite(PORTB, 1, 1);
+  //bitWrite(PORTB, 1, 0);
+  DEBUG_BIT(1);
+}
+
+void set_all_pins_input() {
+  pinMode(LED_STRIP, INPUT_PULLUP);
+  for (uint8_t i=0; i < 8; i++) {
+    pinMode(segment_pins[i], INPUT);
+  }
+}
+
+void indicate (uint8_t value) {
+  // debugging
+  uint8_t indicator=16;
+
+  if (value==0) value=10;
+  pinMode(indicator, OUTPUT);
+  for (uint8_t j=0; j < value; j ++) {
+    digitalWriteFast(indicator, SEGMENT_ON); // on
+    delay (200);
+    digitalWriteFast(indicator, SEGMENT_OFF); // off
+    delay (200);
+  }
+  delay(1000);
+  //
+}
+
+void set_pin_directions(void) {
+  pinMode(LED_STRIP, OUTPUT); digitalWriteFast(LED_STRIP, 0);
+  uint8_t i;
+  indicate (4);
+  //
+  for (i=0; i <= 7; i++) {
+    pinMode(segment_pins[i], OUTPUT);
+    digitalWriteFast(segment_pins[i], SEGMENT_OFF);
+  }
+  pinMode(9, OUTPUT);
+  pinMode(10, OUTPUT);
+  pinMode(DOWN_BUTTON, INPUT);
+  pinMode(UP_BUTTON, INPUT);
+  pinMode(HOURS_BUTTON, INPUT);
+}
+
+const uint8_t segments[]={
    // abcdefg.
-    0b11111100, // 0
+    0b00100000, // 0
     0b01100000, // 1
     0b11011010, // 2
     0b11110010, // 3
@@ -91,80 +196,15 @@ volatile uint8_t segments[]={
     0b00000001  // decimal point
 };
 
-//lISR(TIMER2_OVF_vect) {
-ISR(TIMER2_COMP_vect) {
-  bitWrite(PORTB, 1, 1);
-  if (light_level < 50) {
-    digitalWriteFast(segment_pins[seven_segment_value], 0);
-  }
-  else if (light_level < 100) {
-    if (multiplex_sequence < 60) {
-      digitalWriteFast(segment_pins[seven_segment_value],
-                       bitRead(segments[seven_segment_value], led_sequence));
-    } else digitalWriteFast(segment_pins[seven_segment_value], 0);
-  }
-  else {
-      digitalWriteFast(segment_pins[seven_segment_value],
-                       bitRead(segments[seven_segment_value], led_sequence));
-  }
-  if (led_sequence == 0) led_sequence=7;
-  else led_sequence --;
-  if (multiplex_sequence == 99) multiplex_sequence == 0;
-  else multiplex_sequence++;
-  bitWrite(PORTB, 1, 0);
-}
-
-// Display a number on seven segment LED
-void show_number(uint8_t number) {
-  switch (number) {
-                    // abcdefg.
-    case 0: segments=0b11111100; break;
-    case 1: segments=0b01100000; break;
-    case 2: segments=0b11011010; break;
-    case 3: segments=0b11110010; break;
-    case 4: segments=0b01100110; break;
-    case 5: segments=0b10110110; break;
-    case 6: segments=0b10111110; break;
-    case 7: segments=0b11100000; break;
-    case 8: segments=0b11111110; break;
-    case 9: segments=0b11110110; break;
-    case 10: segments=0b00000001; break;// decimal point
-  }
-}
-
-void set_all_pins_input() {
-  pinMode(LED_STRIP, INPUT_PULLUP);
-}
-
-void set_pin_directions(void) {
-  pinMode(11, OUTPUT); // DC2
-  pinMode(LED_STRIP, OUTPUT);
-  pinMode(DOWN_BUTTON, INPUT);
-  pinMode(UP_BUTTON, INPUT);
-}
-
-void turn_led_off(void) {
-  pinMode(LED_STRIP, INPUT);
-  led_on = false;
-}
-
-void set_light_level(uint8_t pin, uint8_t level) {
-
-}
-
-void turn_led_on(void) {
-  pinMode(LED_STRIP, OUTPUT);
-  led_on = true;
-  set_light_level(LED_STRIP, light_level);
-}
-
 // the setup function runs once when you press reset or power the board
 uint32_t current_millis=0;
 void setup() {
+  segment_bitmap=segments[seven_segment_value];
   // Set up timer 2
   SFIOR |= (1 << PSR2);  // reset prescaler. Not sure I need to do this.
   TCCR2 = 0;
-  OCR2 = 0x7B;  // *approximately* 1024 times per second at 8MHz clock
+      // 0x7B == *approximately* 1024 times per second at 8MHz clock
+  OCR2 = 0x04;  // *approximately* 1024 times per second at 8MHz clock
   TCCR2 &= ~(1 << COM20); // SHUT OFF OUTPUT PIN
   TCCR2 &= ~(1 << COM21); // SHUT OFF OUTPUT PIN
   //TCCR2 |= (1 << WGM21 | 1 << WGM20);  /* Fast PWM mode */
@@ -197,15 +237,12 @@ bool waited=false; // better control when push up starts
  *        Then back down to 1, and repeat.
  */
 void loop() {
-
   /*analogWrite(LED_STRIP, 180);
   return; */
+  segment_bitmap=segments[seven_segment_value];
   now_millis = millis();
   if (! digitalReadFast(DOWN_BUTTON)) {
     if (! down_button) {
-      if ((now_millis - down_button_press) < 1000) {
-        is_double_press = true;
-      }
       down_button_press = now_millis;
     }
     down_button=true;
@@ -215,9 +252,6 @@ void loop() {
   }
   if (! digitalReadFast(UP_BUTTON)) {
     if (! up_button) {
-      if ((now_millis - up_button_press) < 1000) {
-        is_double_press = true;
-      }
       up_button_press = now_millis;
     }
     up_button=true;
@@ -225,16 +259,10 @@ void loop() {
     if (up_button) up_button_release = now_millis;
     up_button=false;
   }
-  if ((! down_button) || (! up_button)) {
-      is_double_press = false;
-  }
-  if (is_double_press) {
-    current_millis = millis();
-    turn_led_off();
-    return;
+  if (! digitalReadFast(HOURS_BUTTON)) {
+    indicate(indicator_value);
   }
   // One or the other button was pressed.
-  if (! led_on) turn_led_on();
   current_millis = millis();
   if (down_button) {
     waited=false;
@@ -243,12 +271,11 @@ void loop() {
       else if (light_level > 50) light_level -= 2;
       else if (light_level > 0) light_level -= 1;
       else {
-            set_light_level(LED_STRIP, 1);
+            light_level=1;
             delay (50);
-            set_light_level(LED_STRIP, 0);
+            light_level=0;
             delay (50);
       }
-      set_light_level(LED_STRIP, light_level);
       last_update_millis = current_millis;
     }
     return;
@@ -266,12 +293,11 @@ void loop() {
       else if (light_level < 120) light_level += 5;
       else {
         light_level=255;
-            set_light_level(LED_STRIP, 255);
-            delay (50);
-            set_light_level(LED_STRIP, 0);
-            delay (50);
+        delay (50);
+        light_level=0;
+        delay (50);
+        light_level=255;
       }
-      set_light_level(LED_STRIP, light_level);
       last_update_millis = current_millis;
     }
     return;
