@@ -22,20 +22,18 @@
 // h == hours button, x=debug signal, y=debug clock.
 //
 //                           +-\/-+
-//     RESET   (D 22)  PC6  1|    |28  PC5  (D 19  A5  SCL ADC5)
-//             (D  0)  PD0  2|s   |27  PC4  (D 18  A4  SDA ADC4)
-//             (D  1)  PD1  3|s   |26  PC3  (D 17  A3  ADC3)
+//     RESET   (D 22)  PC6  1|   s|28  PC5  (D 19  A5  SCL ADC5)
+//             (D  0)  PD0  2|s  s|27  PC4  (D 18  A4  SDA ADC4)
+//             (D  1)  PD1  3|s  s|26  PC3  (D 17  A3  ADC3)
 //       INT0  (D  2)  PD2  4|u  s|25  PC2  (D 16  A2  ADC2)
 //       INT1  (D  3)  PD3  5|d  l|24  PC1  (D 15  A1  ADC1)
 //             (D  4)  PD4  6|s  h|23  PC0  (D 14  A0  ADC0)
 //                     VCC  7|    |22  GND
-//                     GND  8|    |21  AREF
-//             (D 20)  PB6  9|s   |20  AVCC
-//             (D 21)  PB7 10|   s|19  PB5  (D 13  SCK) 
-//             (D  5)  PD5 11|   s|18  PB4  (D 12  MISO) 
-//  AIN0       (D  6)  PD6 12|   s|17  PB3  (D 11  MOSI OC2)
-//  AIN1       (D  7)  PD7 13|   y|16  PB2  (D 10  SS OC1A)
-//             (D  8)  PB0 14|   x|15  PB1  (D  9     OC1B)
+//             (D 21)  PB7 10|    |19  PB5  (D 13  SCK) 
+//             (D  5)  PD5 11|    |18  PB4  (D 12  MISO) 
+//  AIN0       (D  6)  PD6 12|x   |17  PB3  (D 11  MOSI OC2)
+//  AIN1       (D  7)  PD7 13|y   |16  PB2  (D 10  SS OC1A)
+//             (D  8)  PB0 14|    |15  PB1  (D  9     OC1B)
 //                           +----+
 #include <avr/interrupt.h>
 #include "digitalWriteFast.h"
@@ -64,6 +62,8 @@ const uint8_t LED_STRIP = 15;
 const uint8_t DOWN_BUTTON = 2; // INT0
 const uint8_t UP_BUTTON = 3;   // INT1
 const uint8_t HOURS_BUTTON = 14;
+const uint8_t DEBUG_X = 6;
+const uint8_t DEBUG_Y = 7;
 
 uint8_t led_on=false;
 
@@ -77,19 +77,14 @@ volatile uint8_t segment_state, segment_pin, current_segment = 0;
 volatile uint8_t seven_segment_display_update=0;
 volatile uint8_t display_bit=0b10000000;
 
-#define TOGGLE_DEBUG_PIN bitWrite(PORTB, 1, 1); bitWrite(PORTB, 1, 0)
-#define DEBUG_BIT(V) (DDRB |= ((1 << DDB1) & (V)) | (1 << DDB2)); DDRB &= 0b11111001
+//#define TOGGLE_DEBUG_PIN bitWrite(PORTB, 1, 1); bitWrite(PORTB, 1, 0)
+//#define DEBUG_BIT(V) (PORTB |= ((1 << DDB1) & (V)) | (1 << PORTB)); DDRB &= 0b11111001
+#define DEBUG_BIT(V) ((V) != 0) ? PORTD |= 0b11000000 : (PORTD |= 0b10000000); PORTD &= 0b00111111
+
 static inline void isr_display_value(uint8_t value) {
   uint8_t i;
-  for (i=0b10000000; i >> 0; i++) {
-    TOGGLE_DEBUG_PIN;
-    if (i & value) {
-      TOGGLE_DEBUG_PIN;
-    } else {
-      __asm__ __volatile__ ("nop");
-      __asm__ __volatile__ ("nop");
-    }
-    TOGGLE_DEBUG_PIN;
+  for (i=0b10000000; i > 0; i = i>>1) {
+    DEBUG_BIT(i & value);
   }
   //__asm__ __volatile__ ("nop");
 }
@@ -100,6 +95,8 @@ static inline void isr_display_value(uint8_t value) {
 //ISR(timer2_ovf_vect) {
 ISR(TIMER2_COMP_vect) {
   DEBUG_BIT(1);
+  DEBUG_BIT(0);
+  DEBUG_BIT(0);
   // do seven segment display
 
   // NOOP ************************
@@ -107,38 +104,26 @@ ISR(TIMER2_COMP_vect) {
 
   // segment_state = ( (segments[seven_segment_value] & display_bit) > 1 ) ? SEGMENT_ON : SEGMENT_OFF;
   segment_pin = segment_pins[current_segment];
-  //isr_display_value(current_segment);
-  __asm__ __volatile__ ("nop");
-  //isr_display_value(segment_pin);
-  __asm__ __volatile__ ("nop");
+  if (current_segment == 1) {
+    isr_display_value(current_segment);
+    isr_display_value(segment_pin);
+  }
   //isr_display_value(display_bit);
-  __asm__ __volatile__ ("nop");
   //isr_display_value(segment_bitmap);
+
   if ((segment_bitmap & display_bit) != 0) {
     digitalWriteFast(segment_pin, SEGMENT_ON);
   }
   else {
     digitalWriteFast(segment_pin, SEGMENT_OFF);
   }
-  display_bit >>= 1; current_segment--;
+  display_bit >>= 1; current_segment++;
   if (display_bit == 0) {
-    display_bit = 0b10000000; current_segment=7;
+    display_bit = 0b10000000; current_segment=0;
   }
-  // Multiplexing means the seven segment display will never be as bright as the string.
-  // As a matter of fact, it should be 1/10th as bright. Maybe not even worry about this?
-  /*if ((multiplex_sequence <= 80 && light_level < 50) ||
-      (multiplex_sequence <= 150 && light_level < 150) ||
-      (multiplex_sequence > 150)) { digitalWriteFast(segment_pin, segment_state); }
-  else digitalWriteFast(segment_pins[seven_segment_value], 1);*/
-
-
-  // do led string
-  // light_level=250;
-  if (multiplex_sequence <= light_level) { digitalWriteFast(LED_STRIP, 1); }
-  else { digitalWriteFast(LED_STRIP, 0); }
   multiplex_sequence++;
-  //bitWrite(PORTB, 1, 1);
-  //bitWrite(PORTB, 1, 0);
+  DEBUG_BIT(1);
+  DEBUG_BIT(1);
   DEBUG_BIT(1);
 }
 
@@ -161,7 +146,7 @@ void indicate (uint8_t value) {
     digitalWriteFast(indicator, SEGMENT_OFF); // off
     delay (200);
   }
-  delay(1000);
+  delay(500);
   //
 }
 
@@ -169,13 +154,12 @@ void set_pin_directions(void) {
   pinMode(LED_STRIP, OUTPUT); digitalWriteFast(LED_STRIP, 0);
   uint8_t i;
   indicate (4);
-  //
   for (i=0; i <= 7; i++) {
     pinMode(segment_pins[i], OUTPUT);
     digitalWriteFast(segment_pins[i], SEGMENT_OFF);
   }
-  pinMode(9, OUTPUT);
-  pinMode(10, OUTPUT);
+  pinMode(DEBUG_X, OUTPUT);
+  pinMode(DEBUG_Y, OUTPUT);
   pinMode(DOWN_BUTTON, INPUT);
   pinMode(UP_BUTTON, INPUT);
   pinMode(HOURS_BUTTON, INPUT);
@@ -183,7 +167,7 @@ void set_pin_directions(void) {
 
 const uint8_t segments[]={
    // abcdefg.
-    0b00100000, // 0
+    0b11111100, // 0
     0b01100000, // 1
     0b11011010, // 2
     0b11110010, // 3
@@ -200,11 +184,13 @@ const uint8_t segments[]={
 uint32_t current_millis=0;
 void setup() {
   segment_bitmap=segments[seven_segment_value];
+  //delay(100);
   // Set up timer 2
   SFIOR |= (1 << PSR2);  // reset prescaler. Not sure I need to do this.
   TCCR2 = 0;
       // 0x7B == *approximately* 1024 times per second at 8MHz clock
-  OCR2 = 0x04;  // *approximately* 1024 times per second at 8MHz clock
+  OCR2 = 0x09;  // *approximately* 12,500 times per second at 8MHz clock.
+                // divide by 256 == 48.82 cps
   TCCR2 &= ~(1 << COM20); // SHUT OFF OUTPUT PIN
   TCCR2 &= ~(1 << COM21); // SHUT OFF OUTPUT PIN
   //TCCR2 |= (1 << WGM21 | 1 << WGM20);  /* Fast PWM mode */
@@ -239,6 +225,7 @@ bool waited=false; // better control when push up starts
 void loop() {
   /*analogWrite(LED_STRIP, 180);
   return; */
+  return;
   segment_bitmap=segments[seven_segment_value];
   now_millis = millis();
   if (! digitalReadFast(DOWN_BUTTON)) {
