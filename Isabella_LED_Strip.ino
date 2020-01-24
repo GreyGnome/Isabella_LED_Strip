@@ -55,6 +55,8 @@
  *
  */
 
+MULTIPLEX_MAX=100; // PWM over this number. The PWM output is a portion of this.
+
 // Requires pgm_read_byte() to get it out. Costs 1 extra cycle. Not worth it on slower CPUs.
 // const uint8_t PROGMEM segment_pins[] = {0, 13, 12, 11, 1, 4, 20, 10};
 const uint8_t segment_pins[] = {4, 20, 17, 18, 19, 1, 0, 16};
@@ -62,8 +64,14 @@ const uint8_t LED_STRIP = 15;
 const uint8_t DOWN_BUTTON = 2; // INT0
 const uint8_t UP_BUTTON = 3;   // INT1
 const uint8_t HOURS_BUTTON = 14;
-const uint8_t DEBUG_X = 6;
-const uint8_t DEBUG_Y = 7;
+// These must be on the same port.
+const uint8_t DEBUG_X = 6; // bit indicator for debugging
+const uint8_t DEBUG_Y = 7; // Clock for the above
+const uint8_t x_bit = digitalPinToBit(6);
+const uint8_t y_bit = digitalPinToBit(7);
+const uint8_t debug_hi = (1 << digitalPinToBit(6)) | (1 << digitalPinToBit(7));
+const uint8_t debug_lo = (1 << digitalPinToBit(7));
+const uint8_t debug_rst = (uint8_t (~debug_hi)) & (uint8_t (~debug_lo));
 
 uint8_t led_on=false;
 
@@ -71,7 +79,7 @@ volatile uint8_t indicator_value=0;
 volatile uint8_t light_level=0;
 volatile uint8_t multiplex_sequence=0;
 volatile uint8_t segment_bitmap;
-uint8_t seven_segment_value=0;
+uint8_t seven_segment_value=3;
 
 volatile uint8_t segment_state, segment_pin, current_segment = 0;
 volatile uint8_t seven_segment_display_update=0;
@@ -79,14 +87,15 @@ volatile uint8_t display_bit=0b10000000;
 
 //#define TOGGLE_DEBUG_PIN bitWrite(PORTB, 1, 1); bitWrite(PORTB, 1, 0)
 //#define DEBUG_BIT(V) (PORTB |= ((1 << DDB1) & (V)) | (1 << PORTB)); DDRB &= 0b11111001
-#define DEBUG_BIT(V) ((V) != 0) ? PORTD |= 0b11000000 : (PORTD |= 0b10000000); PORTD &= 0b00111111
+//#define DEBUG_BIT(V) ((V) != 0) ? PORTD |= 0b11000000 : (PORTD |= 0b10000000); PORTD &= 0b00111111
+//#define DEBUG_BIT(V) ((V) != 0) ? PORTD |= debug_hi : (PORTD |= debug_lo); PORTD &= debug_rst
+#define DEBUG_BIT(V) ((V) != 0) ? *(digitalPinToPortReg(DEBUG_X)) |= debug_hi : (*(digitalPinToPortReg(DEBUG_X)) |= debug_lo); *(digitalPinToPortReg(DEBUG_X)) &= debug_rst
 
 static inline void isr_display_value(uint8_t value) {
   uint8_t i;
   for (i=0b10000000; i > 0; i = i>>1) {
     DEBUG_BIT(i & value);
   }
-  //__asm__ __volatile__ ("nop");
 }
 
 // On is LOW...
@@ -104,10 +113,10 @@ ISR(TIMER2_COMP_vect) {
 
   // segment_state = ( (segments[seven_segment_value] & display_bit) > 1 ) ? SEGMENT_ON : SEGMENT_OFF;
   segment_pin = segment_pins[current_segment];
-  if (current_segment == 1) {
+  /* if (current_segment == 1) {
     isr_display_value(current_segment);
     isr_display_value(segment_pin);
-  }
+  } */
   //isr_display_value(display_bit);
   //isr_display_value(segment_bitmap);
 
@@ -121,7 +130,7 @@ ISR(TIMER2_COMP_vect) {
   if (display_bit == 0) {
     display_bit = 0b10000000; current_segment=0;
   }
-  multiplex_sequence++;
+  multiplex_sequence++; if (multiplex_sequence == MULTIPLEX_MAX) multiplex_sequence=0;
   DEBUG_BIT(1);
   DEBUG_BIT(1);
   DEBUG_BIT(1);
@@ -177,7 +186,7 @@ const uint8_t segments[]={
     0b11100000, // 7
     0b11111110, // 8
     0b11110110, // 9
-    0b00000001  // decimal point
+    0b00100001  // decimal point + segment c, to represent "10"
 };
 
 // the setup function runs once when you press reset or power the board
@@ -189,10 +198,10 @@ void setup() {
   SFIOR |= (1 << PSR2);  // reset prescaler. Not sure I need to do this.
   TCCR2 = 0;
       // 0x7B == *approximately* 1024 times per second at 8MHz clock
-  OCR2 = 0x09;  // *approximately* 12,500 times per second at 8MHz clock.
-                // divide by 256 == 48.82 cps
-  TCCR2 &= ~(1 << COM20); // SHUT OFF OUTPUT PIN
-  TCCR2 &= ~(1 << COM21); // SHUT OFF OUTPUT PIN
+  OCR2 = 0x08;  // 8 MHz clock. f = 8,000,000 / (2 * prescalar * (1 + OCR2)
+                // then divide by 256.
+  TCCR2 &= ~(1 << COM20); // shut off output pin
+  TCCR2 &= ~(1 << COM21); // shut off output pin
   //TCCR2 |= (1 << WGM21 | 1 << WGM20);  /* Fast PWM mode */
   TCCR2 |= (1 << WGM21);  /* CTC mode */
   TIMSK |= (1 << TOIE2); /* enable timer2 overflow interrupt */
@@ -225,7 +234,6 @@ bool waited=false; // better control when push up starts
 void loop() {
   /*analogWrite(LED_STRIP, 180);
   return; */
-  return;
   segment_bitmap=segments[seven_segment_value];
   now_millis = millis();
   if (! digitalReadFast(DOWN_BUTTON)) {
@@ -246,11 +254,19 @@ void loop() {
     if (up_button) up_button_release = now_millis;
     up_button=false;
   }
-  if (! digitalReadFast(HOURS_BUTTON)) {
-    indicate(indicator_value);
-  }
   // One or the other button was pressed.
   current_millis = millis();
+  if (! digitalReadFast(HOURS_BUTTON)) {
+    if (now_millis - last_update_millis > 750) {
+      if (seven_segment_value < 10) {
+        seven_segment_value++;
+      } else {
+        seven_segment_value = 0;
+      }
+      last_update_millis = current_millis;
+    }
+    return;
+  }
   if (down_button) {
     waited=false;
     if (current_millis - last_update_millis > 50) {
