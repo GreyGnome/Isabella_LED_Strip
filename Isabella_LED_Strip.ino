@@ -29,10 +29,12 @@
 //       INT1  (D  3)  PD3  5|d  l|24  PC1  (D 15  A1  ADC1)
 //             (D  4)  PD4  6|s  h|23  PC0  (D 14  A0  ADC0)
 //                     VCC  7|    |22  GND
+//                     GND  8|    |21  AREF
+//             (D 20)  PB6  9|    |20  AVCC
 //             (D 21)  PB7 10|    |19  PB5  (D 13  SCK) 
 //             (D  5)  PD5 11|    |18  PB4  (D 12  MISO) 
 //  AIN0       (D  6)  PD6 12|x   |17  PB3  (D 11  MOSI OC2)
-//  AIN1       (D  7)  PD7 13|y   |16  PB2  (D 10  SS OC1A)
+//  AIN1       (D  7)  PD7 13|clk |16  PB2  (D 10  SS OC1A)
 //             (D  8)  PB0 14|    |15  PB1  (D  9     OC1B)
 //                           +----+
 #include <avr/interrupt.h>
@@ -55,22 +57,23 @@
  *
  */
 
-MULTIPLEX_MAX=100; // PWM over this number. The PWM output is a portion of this.
+const uint8_t MULTIPLEX_MAX=255; // PWM over this number. The PWM output is a portion of this.
 
 // Requires pgm_read_byte() to get it out. Costs 1 extra cycle. Not worth it on slower CPUs.
 // const uint8_t PROGMEM segment_pins[] = {0, 13, 12, 11, 1, 4, 20, 10};
 const uint8_t segment_pins[] = {4, 20, 17, 18, 19, 1, 0, 16};
 const uint8_t LED_STRIP = 15;
+volatile uint8_t led_strip_sequence=0;
 const uint8_t DOWN_BUTTON = 2; // INT0
 const uint8_t UP_BUTTON = 3;   // INT1
 const uint8_t HOURS_BUTTON = 14;
 // These must be on the same port.
 const uint8_t DEBUG_X = 6; // bit indicator for debugging
-const uint8_t DEBUG_Y = 7; // Clock for the above
-const uint8_t x_bit = digitalPinToBit(6);
-const uint8_t y_bit = digitalPinToBit(7);
-const uint8_t debug_hi = (1 << digitalPinToBit(6)) | (1 << digitalPinToBit(7));
-const uint8_t debug_lo = (1 << digitalPinToBit(7));
+const uint8_t DEBUG_CLK = 7; // Clock for the above
+const uint8_t x_bit = digitalPinToBit(DEBUG_X);
+const uint8_t y_bit = digitalPinToBit(DEBUG_CLK);
+const uint8_t debug_hi = (1 << digitalPinToBit(DEBUG_X)) | (1 << digitalPinToBit(DEBUG_CLK));
+const uint8_t debug_lo = (1 << digitalPinToBit(DEBUG_CLK));
 const uint8_t debug_rst = (uint8_t (~debug_hi)) & (uint8_t (~debug_lo));
 
 uint8_t led_on=false;
@@ -79,7 +82,8 @@ volatile uint8_t indicator_value=0;
 volatile uint8_t light_level=0;
 volatile uint8_t multiplex_sequence=0;
 volatile uint8_t segment_bitmap;
-uint8_t seven_segment_value=3;
+uint8_t seven_segment_start = 3;
+volatile uint8_t seven_segment_value = seven_segment_start;
 
 volatile uint8_t segment_state, segment_pin, current_segment = 0;
 volatile uint8_t seven_segment_display_update=0;
@@ -103,37 +107,49 @@ static inline void isr_display_value(uint8_t value) {
 #define SEGMENT_ON 0
 //ISR(timer2_ovf_vect) {
 ISR(TIMER2_COMP_vect) {
-  DEBUG_BIT(1);
-  DEBUG_BIT(0);
-  DEBUG_BIT(0);
+  //DEBUG_BIT(1);
+  //DEBUG_BIT(1);
   // do seven segment display
 
   // NOOP ************************
   // __asm__ __volatile__ ("nop");
 
-  // segment_state = ( (segments[seven_segment_value] & display_bit) > 1 ) ? SEGMENT_ON : SEGMENT_OFF;
-  segment_pin = segment_pins[current_segment];
-  /* if (current_segment == 1) {
-    isr_display_value(current_segment);
-    isr_display_value(segment_pin);
-  } */
-  //isr_display_value(display_bit);
-  //isr_display_value(segment_bitmap);
-
-  if ((segment_bitmap & display_bit) != 0) {
-    digitalWriteFast(segment_pin, SEGMENT_ON);
+  // do LED strip
+  if (led_strip_sequence < light_level) {
+    digitalWriteFast(LED_STRIP, HIGH);
   }
   else {
-    digitalWriteFast(segment_pin, SEGMENT_OFF);
+    digitalWriteFast(LED_STRIP, LOW);
+  }
+  led_strip_sequence++;
+  
+  isr_display_value(light_level);
+  
+  // do seven segment display
+  digitalWriteFast(segment_pin, SEGMENT_OFF); // reset old pin for multiplexing
+  segment_pin = segment_pins[current_segment];
+  digitalWriteFast(segment_pin, SEGMENT_OFF); // reset new pin for multiplexing
+
+  if ((segment_bitmap & display_bit) != 0) {
+    if (light_level < 5) {
+      if (led_strip_sequence < 20) {
+        if ((segment_bitmap & display_bit) != 0) digitalWriteFast(segment_pin, SEGMENT_ON);
+      }
+    }
+    else if (light_level < 20) {
+      if (led_strip_sequence < 90) {
+        if ((segment_bitmap & display_bit) != 0) digitalWriteFast(segment_pin, SEGMENT_ON);
+      }
+    } else {
+      if ((segment_bitmap & display_bit) != 0) digitalWriteFast(segment_pin, SEGMENT_ON);
+    }
   }
   display_bit >>= 1; current_segment++;
   if (display_bit == 0) {
     display_bit = 0b10000000; current_segment=0;
   }
-  multiplex_sequence++; if (multiplex_sequence == MULTIPLEX_MAX) multiplex_sequence=0;
-  DEBUG_BIT(1);
-  DEBUG_BIT(1);
-  DEBUG_BIT(1);
+  //DEBUG_BIT(1);
+  //DEBUG_BIT(0);
 }
 
 void set_all_pins_input() {
@@ -168,7 +184,7 @@ void set_pin_directions(void) {
     digitalWriteFast(segment_pins[i], SEGMENT_OFF);
   }
   pinMode(DEBUG_X, OUTPUT);
-  pinMode(DEBUG_Y, OUTPUT);
+  pinMode(DEBUG_CLK, OUTPUT);
   pinMode(DOWN_BUTTON, INPUT);
   pinMode(UP_BUTTON, INPUT);
   pinMode(HOURS_BUTTON, INPUT);
@@ -189,8 +205,16 @@ const uint8_t segments[]={
     0b00100001  // decimal point + segment c, to represent "10"
 };
 
+#define S_PER_H 3600   // change this to debug.
+volatile uint32_t now_millis=0, hours_millis, hours_started_millis;
+static inline void reset_hours(uint8_t starting) {
+  seven_segment_value = starting;
+  hours_started_millis = millis();
+  hours_millis = (uint32_t)1000 * S_PER_H * (uint32_t)seven_segment_value;
+}
+
+uint32_t last_update_millis=0;
 // the setup function runs once when you press reset or power the board
-uint32_t current_millis=0;
 void setup() {
   segment_bitmap=segments[seven_segment_value];
   //delay(100);
@@ -198,7 +222,7 @@ void setup() {
   SFIOR |= (1 << PSR2);  // reset prescaler. Not sure I need to do this.
   TCCR2 = 0;
       // 0x7B == *approximately* 1024 times per second at 8MHz clock
-  OCR2 = 0x08;  // 8 MHz clock. f = 8,000,000 / (2 * prescalar * (1 + OCR2)
+  OCR2 = 0x07;  // 8 MHz clock: f = 8,000,000 / (2 * prescalar * (1 + OCR2)
                 // then divide by 256.
   TCCR2 &= ~(1 << COM20); // shut off output pin
   TCCR2 &= ~(1 << COM21); // shut off output pin
@@ -209,20 +233,23 @@ void setup() {
   //TCCR2 |= (1 << CS20);   // No prescaler 
   TCCR2 |= (1 << CS22);   // x64 prescaler 
   TIFR |= (1 << TOV2);    /* clear interrupt flag */
-  // 2222222222222222222222222222222222222222222222222222222222222
+  // 800000000000000000000000000000000000000000000000000000000000000000000000000000
   set_pin_directions();
-  current_millis=millis();
   ADCSRA &= ~(1<<ADEN); // Disable ADC for better power consumption
+  now_millis = millis();
+  seven_segment_value=seven_segment_start;
+  reset_hours(seven_segment_start);
+  delay(500);
+  last_update_millis = millis();
 }
 
-uint32_t now_millis=0, last_update_millis=0, flash_millis, 
-         down_button_press=0, up_button_press=0;
-uint32_t down_button_release=0, up_button_release=0;
+uint32_t down_button_press=0, up_button_press=0;
 uint32_t last_down_press=0, last_up_press=0;
 bool is_double_press=false; // double_press: down/down within 1 second.
 bool down_button=false;
 bool up_button=false;
 bool waited=false; // better control when push up starts
+
 // the loop function runs forever
 /*
  * Buttons:
@@ -231,69 +258,43 @@ bool waited=false; // better control when push up starts
  * both : raise number of hours that the lights will stay on, up till 10.
  *        Then back down to 1, and repeat.
  */
+uint32_t delta_millis = 0;
 void loop() {
   /*analogWrite(LED_STRIP, 180);
   return; */
   segment_bitmap=segments[seven_segment_value];
   now_millis = millis();
+  delta_millis = now_millis - last_update_millis;
+
+  // BUTTONS 80000000000000000000000000000000000000000000000000000000000000000000000
   if (! digitalReadFast(DOWN_BUTTON)) {
-    if (! down_button) {
-      down_button_press = now_millis;
-    }
-    down_button=true;
-  } else {
-    if (down_button) down_button_release = now_millis;
-    down_button=false;
-  }
-  if (! digitalReadFast(UP_BUTTON)) {
-    if (! up_button) {
-      up_button_press = now_millis;
-    }
-    up_button=true;
-  } else {
-    if (up_button) up_button_release = now_millis;
-    up_button=false;
-  }
-  // One or the other button was pressed.
-  current_millis = millis();
-  if (! digitalReadFast(HOURS_BUTTON)) {
-    if (now_millis - last_update_millis > 750) {
-      if (seven_segment_value < 10) {
-        seven_segment_value++;
-      } else {
-        seven_segment_value = 0;
-      }
-      last_update_millis = current_millis;
-    }
-    return;
-  }
-  if (down_button) {
-    waited=false;
-    if (current_millis - last_update_millis > 50) {
+    if (delta_millis > 50) {
       if (light_level > 100) light_level -= 5;
       else if (light_level > 50) light_level -= 2;
-      else if (light_level > 0) light_level -= 1;
+      else if (light_level > 0) { delay(10); light_level -= 1; }
       else {
             light_level=1;
             delay (50);
             light_level=0;
             delay (50);
       }
-      last_update_millis = current_millis;
-    }
-    return;
-  }
-  if (up_button) {
-    if (current_millis - last_update_millis > 50) {
-      if (light_level < 5) { 
-        if (waited) {
-          light_level += 1;
-          waited=false;
-        } else waited=true;
+      last_update_millis = now_millis;
+      if (seven_segment_value == 0) {
+        reset_hours(seven_segment_start);
       }
-      else if (light_level < 50) light_level += 1;
+    }
+  }
+  else if (! digitalReadFast(UP_BUTTON)) {
+    if (delta_millis > 100) {  // button pressed down longer than 100 millis.
+      if (light_level < 10) {  // Add a short delay. Somehow up activates faster than down
+        delay(200);
+      }
+      if (light_level < 30) {  // Add a short delay. Somehow up activates faster than down
+        delay(100);
+      }
+      if (light_level < 50) light_level += 1;
       else if (light_level < 80) light_level += 2;
-      else if (light_level < 120) light_level += 5;
+      else if (light_level > 120 && light_level < 249) light_level += 5;
       else {
         light_level=255;
         delay (50);
@@ -301,8 +302,40 @@ void loop() {
         delay (50);
         light_level=255;
       }
-      last_update_millis = current_millis;
+      //isr_display_value(seven_segment_start);
+      if (seven_segment_value == 0) {
+        reset_hours(seven_segment_start);
+        //isr_display_value(seven_segment_value);
+      }
+      last_update_millis = now_millis;
     }
-    return;
+  }
+  // ******************************************************************************
+  else if (! digitalReadFast(HOURS_BUTTON)) {
+    if (delta_millis > 750) {
+      if (seven_segment_value < 10) {
+        seven_segment_value++;
+      } else {
+        seven_segment_value = 0;
+      }
+      seven_segment_start = seven_segment_value;
+      last_update_millis = now_millis;
+    }
+    reset_hours(seven_segment_start);
+  }
+  // ******************************************************************************
+  if (hours_started_millis < now_millis) {
+    if (seven_segment_value == 0) {
+      light_level = 0;
+    } else {
+      // even though we're doing 32-bit manipulations here, this section only takes a
+      // few micros (on the order of 5 or so) at 8 MHz.
+      uint32_t delta_hours_millis = now_millis - hours_started_millis;
+      if (delta_hours_millis > S_PER_H * (uint32_t)1000) {
+        if (seven_segment_value != 0) seven_segment_value--;
+        hours_started_millis = millis();
+        reset_hours(seven_segment_value);
+      }
+    }
   }
 }
